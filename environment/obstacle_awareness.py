@@ -9,12 +9,13 @@ class ObstacleAwareness:
         self,
         world,
         vehicle,
-        detection_distance=40.0,
-        cautious_distance=18.0,
-        brake_distance=7.0,
+        detection_distance=35.0,
+        cautious_distance=8.0,
+        brake_distance=4.5,
         lane_width=3.5,
-        min_following_distance=12.0,
-        time_headway=2.2
+        min_following_distance=6.0,
+        time_headway=1.5,
+        reaction_cooldown_steps=8
     ):
 
         self.world = world
@@ -26,6 +27,10 @@ class ObstacleAwareness:
         self.lane_width = lane_width
         self.min_following_distance = min_following_distance
         self.time_headway = time_headway
+        self.reaction_cooldown_steps = reaction_cooldown_steps
+        self.reaction_cooldown = 0
+        self.last_obstacle_id = None
+        self.last_follow_speed = None
 
     def get_obstacle_ahead(self):
 
@@ -111,6 +116,28 @@ class ObstacleAwareness:
         obstacle, distance = self.get_obstacle_ahead()
 
         if obstacle is None:
+            if (
+                self.reaction_cooldown > 0 and
+                self.last_follow_speed is not None
+            ):
+                self.reaction_cooldown -= 1
+                cooldown_speed = min(
+                    target_speed,
+                    self.last_follow_speed + 0.2
+                )
+                self.last_follow_speed = cooldown_speed
+
+                print(
+                    f"Obstacle cooldown | "
+                    f"steps: {self.reaction_cooldown} | "
+                    f"target: {cooldown_speed:.2f}m/s"
+                )
+
+                return cooldown_speed, False, None, None
+
+            self.last_obstacle_id = None
+            self.last_follow_speed = None
+
             return target_speed, False, None, None
 
         self.world.debug.draw_line(
@@ -122,12 +149,22 @@ class ObstacleAwareness:
         )
 
         if obstacle.type_id.startswith('vehicle.'):
-            return self._follow_vehicle(
-                obstacle,
-                distance,
-                target_speed,
-                current_speed
+            target_speed, emergency_brake, obstacle, distance = (
+                self._follow_vehicle(
+                    obstacle,
+                    distance,
+                    target_speed,
+                    current_speed
+                )
             )
+
+            target_speed = self._stabilize_follow_speed(
+                obstacle,
+                target_speed,
+                emergency_brake
+            )
+
+            return target_speed, emergency_brake, obstacle, distance
 
         if distance <= self.brake_distance:
             return 0.0, True, obstacle, distance
@@ -155,10 +192,10 @@ class ObstacleAwareness:
 
         danger_distance = max(
             self.brake_distance,
-            current_speed * 1.0
+            current_speed * 0.7
         )
 
-        approach_distance = safe_distance + max(10.0, current_speed * 1.8)
+        approach_distance = safe_distance + max(7.0, current_speed * 1.2)
         time_to_collision = None
 
         if closing_speed > 0.1:
@@ -168,9 +205,9 @@ class ObstacleAwareness:
             distance <= danger_distance or
             (
                 time_to_collision is not None and
-                time_to_collision < 1.8
+                time_to_collision < 1.2
             ) or
-            (distance < safe_distance * 0.65 and closing_speed > 0.5)
+            (distance < safe_distance * 0.45 and closing_speed > 0.8)
         ):
             print(
                 f"Following vehicle {obstacle.id} | "
@@ -186,8 +223,10 @@ class ObstacleAwareness:
             return 0.0, True, obstacle, distance
 
         if distance < safe_distance:
-            gap_ratio = max(distance / safe_distance, 0.2)
-            follow_speed = lead_speed * gap_ratio
+            gap_ratio = max(distance / safe_distance, 0.35)
+            crawl_speed = max(distance - danger_distance, 0.0) * 0.25
+            crawl_speed = min(crawl_speed, 0.8)
+            follow_speed = max(lead_speed * gap_ratio, crawl_speed)
             follow_speed = min(target_speed, follow_speed)
 
             print(
@@ -199,7 +238,7 @@ class ObstacleAwareness:
                 f"lead: {lead_speed:.2f}m/s | "
                 f"closing: {closing_speed:.2f}m/s | "
                 f"target: {follow_speed:.2f}m/s | "
-                "decision: proportional braking"
+                "decision: close speed matching"
             )
 
             return (
@@ -216,8 +255,8 @@ class ObstacleAwareness:
             )
             approach_ratio = max(0.0, min(1.0, approach_ratio))
 
-            closing_penalty = min(closing_speed * 0.8, 2.5)
-            matched_speed = lead_speed + approach_ratio * 2.0
+            closing_penalty = min(closing_speed * 0.45, 1.5)
+            matched_speed = lead_speed + approach_ratio * 2.5
             follow_speed = max(matched_speed - closing_penalty, 0.0)
             follow_speed = min(target_speed, follow_speed)
 
@@ -230,7 +269,7 @@ class ObstacleAwareness:
                 f"lead: {lead_speed:.2f}m/s | "
                 f"closing: {closing_speed:.2f}m/s | "
                 f"target: {follow_speed:.2f}m/s | "
-                "decision: early speed reduction"
+                "decision: smooth speed matching"
             )
 
             return (
@@ -252,6 +291,50 @@ class ObstacleAwareness:
         )
 
         return target_speed, False, obstacle, distance
+
+    def _stabilize_follow_speed(
+        self,
+        obstacle,
+        target_speed,
+        emergency_brake
+    ):
+
+        if emergency_brake:
+            self.last_obstacle_id = obstacle.id
+            self.last_follow_speed = target_speed
+            self.reaction_cooldown = self.reaction_cooldown_steps
+
+            return target_speed
+
+        if (
+            self.last_obstacle_id == obstacle.id and
+            self.last_follow_speed is not None
+        ):
+            speed_delta = target_speed - self.last_follow_speed
+
+            if speed_delta > 0.0:
+                target_speed = self.last_follow_speed + min(
+                    speed_delta,
+                    0.15
+                )
+            else:
+                target_speed = self.last_follow_speed + max(
+                    speed_delta,
+                    -0.35
+                )
+
+        self.last_obstacle_id = obstacle.id
+        self.last_follow_speed = target_speed
+        self.reaction_cooldown = self.reaction_cooldown_steps
+
+        print(
+            f"Obstacle reaction stable | "
+            f"vehicle: {obstacle.id} | "
+            f"target: {target_speed:.2f}m/s | "
+            f"cooldown: {self.reaction_cooldown}"
+        )
+
+        return target_speed
 
     def _get_actor_speed(self, actor):
 

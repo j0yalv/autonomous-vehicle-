@@ -3,10 +3,12 @@ class SpeedSmoother:
     def __init__(
         self,
         initial_speed=0.0,
-        max_accel_rate=1.2,
+        max_accel_rate=4.0,
         max_decel_rate=4.0,
-        throttle_rate=2.0,
-        brake_rate=5.0
+        throttle_rate=1.4,
+        brake_rate=3.5,
+        control_deadband=0.04,
+        switch_deadband=0.12
     ):
 
         self.target_speed = initial_speed
@@ -16,6 +18,8 @@ class SpeedSmoother:
         self.max_decel_rate = max_decel_rate
         self.throttle_rate = throttle_rate
         self.brake_rate = brake_rate
+        self.control_deadband = control_deadband
+        self.switch_deadband = switch_deadband
 
     def smooth_target_speed(self, desired_speed, dt, force_stop=False):
 
@@ -53,6 +57,18 @@ class SpeedSmoother:
             )
 
             return self.throttle, self.brake
+
+        if throttle < self.control_deadband:
+            throttle = 0.0
+
+        if brake < self.control_deadband:
+            brake = 0.0
+
+        if self.brake > self.control_deadband and throttle < self.switch_deadband:
+            throttle = 0.0
+
+        if self.throttle > self.control_deadband and brake < self.switch_deadband:
+            brake = 0.0
 
         throttle = self._rate_limit(
             self.throttle,
