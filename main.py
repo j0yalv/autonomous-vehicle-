@@ -7,7 +7,11 @@ from controllers.pid_controller import PIDController
 
 from sensors.collision_sensor import CollisionSensor
 from sensors.lane_invasion_sensor import LaneInvasionSensor
-# from sensors.camera_manager import CameraManager
+from sensors.camera_manager import CameraManager
+
+from environment.obstacle_awareness import ObstacleAwareness
+from environment.traffic_light_handler import TrafficLightHandler
+from environment.traffic_spawner import TrafficSpawner
 
 from utils.metrics import Metrics
 from utils.plot_metrics import PlotMetrics
@@ -41,7 +45,28 @@ collision_sensor = CollisionSensor(world, vehicle)
 
 lane_sensor = LaneInvasionSensor(world, vehicle)
 
-# camera_manager = CameraManager(world, vehicle)
+camera_manager = CameraManager(world, vehicle)
+
+
+# ---------------- Environment Awareness ---------------- #
+
+traffic_spawner = TrafficSpawner(
+    client,
+    world,
+    vehicle
+)
+
+traffic_spawner.spawn()
+
+obstacle_awareness = ObstacleAwareness(
+    world,
+    vehicle
+)
+
+traffic_light_handler = TrafficLightHandler(
+    world,
+    vehicle
+)
 
 
 # ---------------- Metrics ---------------- #
@@ -170,6 +195,21 @@ for i in range(1000):
 
     target_speed = 5.0
 
+    (
+        target_speed,
+        emergency_brake,
+        obstacle,
+        obstacle_distance
+    ) = obstacle_awareness.apply_reactive_speed(target_speed)
+
+    (
+        target_speed,
+        traffic_light_brake,
+        traffic_light_state
+    ) = traffic_light_handler.apply_reactive_speed(target_speed)
+
+    emergency_brake = emergency_brake or traffic_light_brake
+
     speed_error = target_speed - current_speed
 
     # -------- Speed PID -------- #
@@ -183,6 +223,10 @@ for i in range(1000):
         throttle = min(throttle_output, 1.0)
     else:
         brake = min(abs(throttle_output), 1.0)
+
+    if emergency_brake:
+        throttle = 0.0
+        brake = 1.0
 
     # -------- Vehicle Control -------- #
 
@@ -208,10 +252,28 @@ for i in range(1000):
         steer
     )
 
+    obstacle_message = ""
+
+    if obstacle is not None:
+        obstacle_message = (
+            f" | Obstacle: {obstacle.type_id} "
+            f"{obstacle_distance:.1f}m"
+        )
+
+    traffic_light_message = ""
+
+    if traffic_light_state is not None:
+        traffic_light_message = (
+            f" | Light: {traffic_light_state}"
+        )
+
     print(
         f"Step {i} | "
         f"Speed: {current_speed:.2f} | "
+        f"Target: {target_speed:.2f} | "
         f"Steer: {steer:.2f}"
+        f"{obstacle_message}"
+        f"{traffic_light_message}"
     )
 
     time.sleep(dt)
@@ -241,7 +303,9 @@ collision_sensor.destroy()
 
 lane_sensor.destroy()
 
-# camera_manager.destroy()
+camera_manager.destroy()
+
+traffic_spawner.destroy()
 
 vehicle.destroy()
 

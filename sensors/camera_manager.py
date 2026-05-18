@@ -2,6 +2,8 @@ import carla
 import cv2
 import numpy as np
 
+from detectors.yolo_detector import YOLODetector
+
 
 class CameraManager:
 
@@ -27,6 +29,8 @@ class CameraManager:
             attach_to=vehicle
         )
 
+        self.detector = YOLODetector()
+
         self.camera.listen(self.process_image)
 
     def process_image(self, image):
@@ -40,7 +44,9 @@ class CameraManager:
             (image.height, image.width, 4)
         )
 
-        array = array[:, :, :3]
+        array = array[:, :, :3].copy()
+
+        array = self.detector.detect_and_draw(array)
 
         cv2.imshow("CARLA Camera", array)
 
