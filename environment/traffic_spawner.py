@@ -2,6 +2,8 @@ import random
 
 import carla
 
+from environment.actor_cleanup import ActorCleanup
+
 
 class TrafficSpawner:
 
@@ -10,7 +12,7 @@ class TrafficSpawner:
         client,
         world,
         ego_vehicle,
-        vehicle_count=12,
+        vehicle_count=20,
         pedestrian_count=12
     ):
 
@@ -61,6 +63,9 @@ class TrafficSpawner:
                 )
                 blueprint.set_attribute('color', color)
 
+            if blueprint.has_attribute('role_name'):
+                blueprint.set_attribute('role_name', 'autonomous_npc')
+
             npc_vehicle = self.world.try_spawn_actor(
                 blueprint,
                 spawn_point
@@ -94,6 +99,9 @@ class TrafficSpawner:
             if blueprint.has_attribute('is_invincible'):
                 blueprint.set_attribute('is_invincible', 'false')
 
+            if blueprint.has_attribute('role_name'):
+                blueprint.set_attribute('role_name', 'autonomous_pedestrian')
+
             walker = self.world.try_spawn_actor(
                 blueprint,
                 carla.Transform(location)
@@ -126,12 +134,23 @@ class TrafficSpawner:
 
     def destroy(self):
 
-        for controller in self.walker_controllers:
-            controller.stop()
-            controller.destroy()
+        print("Cleaning up spawned traffic actors")
 
-        for walker in self.walkers:
-            walker.destroy()
+        destroyed_controllers = ActorCleanup.destroy_actors(
+            self.walker_controllers
+        )
 
-        for vehicle in self.vehicles:
-            vehicle.destroy()
+        destroyed_walkers = ActorCleanup.destroy_actors(self.walkers)
+
+        destroyed_vehicles = ActorCleanup.destroy_actors(self.vehicles)
+
+        print(
+            f"Traffic cleanup destroyed "
+            f"{destroyed_vehicles} vehicles, "
+            f"{destroyed_walkers} pedestrians, "
+            f"{destroyed_controllers} walker controllers"
+        )
+
+        self.walker_controllers = []
+        self.walkers = []
+        self.vehicles = []

@@ -1,7 +1,6 @@
 import carla
 import time
 import math
-import random
 
 from controllers.pid_controller import PIDController
 
@@ -9,12 +8,27 @@ from sensors.collision_sensor import CollisionSensor
 from sensors.lane_invasion_sensor import LaneInvasionSensor
 from sensors.camera_manager import CameraManager
 
+from environment.actor_cleanup import ActorCleanup
 from environment.obstacle_awareness import ObstacleAwareness
+from environment.speed_smoother import SpeedSmoother
 from environment.traffic_light_handler import TrafficLightHandler
 from environment.traffic_spawner import TrafficSpawner
 
 from utils.metrics import Metrics
 from utils.plot_metrics import PlotMetrics
+
+
+def safe_destroy(name, obj):
+
+    if obj is None:
+        return
+
+    try:
+        obj.destroy()
+        print(f"{name} destroyed")
+
+    except Exception as exc:
+        print(f"{name} cleanup skipped: {exc}")
 
 
 # ---------------- CARLA Setup ---------------- #
@@ -28,299 +42,348 @@ map = world.get_map()
 
 blueprint_library = world.get_blueprint_library()
 
-vehicle_bp = blueprint_library.filter('vehicle.tesla.model3')[0]
+vehicle = None
+collision_sensor = None
+lane_sensor = None
+camera_manager = None
+traffic_spawner = None
+plot_metrics = None
 
-spawn_points = map.get_spawn_points()
+try:
 
-spawn_point = spawn_points[20]
+    ActorCleanup.cleanup_existing_actors(world)
 
-vehicle = world.spawn_actor(vehicle_bp, spawn_point)
+    vehicle_bp = blueprint_library.filter('vehicle.tesla.model3')[0]
 
-print("Vehicle spawned")
+    if vehicle_bp.has_attribute('role_name'):
+        vehicle_bp.set_attribute('role_name', 'autonomous_ego')
 
+    spawn_points = map.get_spawn_points()
 
-# ---------------- Sensors ---------------- #
+    spawn_point = spawn_points[20]
 
-collision_sensor = CollisionSensor(world, vehicle)
+    vehicle = world.spawn_actor(vehicle_bp, spawn_point)
 
-lane_sensor = LaneInvasionSensor(world, vehicle)
-
-camera_manager = CameraManager(world, vehicle)
-
-
-# ---------------- Environment Awareness ---------------- #
-
-traffic_spawner = TrafficSpawner(
-    client,
-    world,
-    vehicle
-)
-
-traffic_spawner.spawn()
-
-obstacle_awareness = ObstacleAwareness(
-    world,
-    vehicle
-)
-
-traffic_light_handler = TrafficLightHandler(
-    world,
-    vehicle
-)
+    print(f"Vehicle spawned: {vehicle.id}")
 
 
-# ---------------- Metrics ---------------- #
+    # ---------------- Sensors ---------------- #
 
-metrics = Metrics()
+    collision_sensor = CollisionSensor(world, vehicle)
 
-plot_metrics = PlotMetrics()
+    lane_sensor = LaneInvasionSensor(world, vehicle)
 
-
-# ---------------- PID Setup ---------------- #
-
-steering_pid = PIDController(
-    kp=0.5,
-    ki=0.0,
-    kd=0.08
-)
-
-speed_pid = PIDController(
-    kp=0.4,
-    ki=0.0,
-    kd=0.05
-)
+    camera_manager = CameraManager(world, vehicle)
 
 
-# ---------------- Main Loop ---------------- #
+    # ---------------- Environment Awareness ---------------- #
 
-dt = 0.05
-
-for i in range(1000):
-
-    transform = vehicle.get_transform()
-
-    vehicle_location = vehicle.get_location()
-
-    # -------- Spectator Camera -------- #
-
-    spectator = world.get_spectator()
-
-    forward_vector = transform.get_forward_vector()
-
-    camera_location = carla.Location(
-        x=transform.location.x - forward_vector.x * 10,
-        y=transform.location.y - forward_vector.y * 10,
-        z=transform.location.z + 5
+    traffic_spawner = TrafficSpawner(
+        client,
+        world,
+        vehicle
     )
 
-    camera_rotation = carla.Rotation(
-        pitch=-15,
-        yaw=transform.rotation.yaw,
-        roll=0
+    traffic_spawner.spawn()
+
+    obstacle_awareness = ObstacleAwareness(
+        world,
+        vehicle
     )
 
-    spectator.set_transform(
-        carla.Transform(
-            camera_location,
-            camera_rotation
+    traffic_light_handler = TrafficLightHandler(
+        world,
+        vehicle
+    )
+
+    speed_smoother = SpeedSmoother()
+
+
+    # ---------------- Metrics ---------------- #
+
+    metrics = Metrics()
+
+    plot_metrics = PlotMetrics()
+
+
+    # ---------------- PID Setup ---------------- #
+
+    steering_pid = PIDController(
+        kp=0.5,
+        ki=0.0,
+        kd=0.08
+    )
+
+    speed_pid = PIDController(
+        kp=0.4,
+        ki=0.0,
+        kd=0.05
+    )
+
+
+    # ---------------- Main Loop ---------------- #
+
+    dt = 0.05
+
+    for i in range(1000):
+
+        transform = vehicle.get_transform()
+
+        vehicle_location = vehicle.get_location()
+
+        # -------- Spectator Camera -------- #
+
+        spectator = world.get_spectator()
+
+        forward_vector = transform.get_forward_vector()
+
+        camera_location = carla.Location(
+            x=transform.location.x - forward_vector.x * 10,
+            y=transform.location.y - forward_vector.y * 10,
+            z=transform.location.z + 5
         )
-    )
 
-    # -------- Get Closest Lane Waypoint -------- #
+        camera_rotation = carla.Rotation(
+            pitch=-15,
+            yaw=transform.rotation.yaw,
+            roll=0
+        )
 
-    current_waypoint = map.get_waypoint(
-        vehicle_location,
-        project_to_road=True,
-        lane_type=carla.LaneType.Driving
-    )
+        spectator.set_transform(
+            carla.Transform(
+                camera_location,
+                camera_rotation
+            )
+        )
 
-    # -------- Look Ahead Waypoint -------- #
+        # -------- Get Closest Lane Waypoint -------- #
 
-    next_waypoints = current_waypoint.next(5.0)
+        current_waypoint = map.get_waypoint(
+            vehicle_location,
+            project_to_road=True,
+            lane_type=carla.LaneType.Driving
+        )
 
-    if len(next_waypoints) == 0:
-        break
+        # -------- Look Ahead Waypoint -------- #
 
-    target_waypoint = next_waypoints[0]
+        next_waypoints = current_waypoint.next(5.0)
 
-    target_location = target_waypoint.transform.location
+        if len(next_waypoints) == 0:
+            break
 
-    # -------- Debug Visualization -------- #
+        target_waypoint = next_waypoints[0]
 
-    world.debug.draw_point(
-        target_location,
-        size=0.15,
-        color=carla.Color(255, 0, 0),
-        life_time=0.1
-    )
+        target_location = target_waypoint.transform.location
 
-    # -------- Vehicle Orientation -------- #
+        # -------- Debug Visualization -------- #
 
-    vehicle_yaw = math.radians(transform.rotation.yaw)
+        world.debug.draw_point(
+            target_location,
+            size=0.15,
+            color=carla.Color(255, 0, 0),
+            life_time=0.1
+        )
 
-    # -------- Direction To Waypoint -------- #
+        # -------- Vehicle Orientation -------- #
 
-    direction_x = target_location.x - vehicle_location.x
-    direction_y = target_location.y - vehicle_location.y
+        vehicle_yaw = math.radians(transform.rotation.yaw)
 
-    desired_yaw = math.atan2(direction_y, direction_x)
+        # -------- Direction To Waypoint -------- #
 
-    # -------- Heading Error -------- #
+        direction_x = target_location.x - vehicle_location.x
+        direction_y = target_location.y - vehicle_location.y
 
-    heading_error = desired_yaw - vehicle_yaw
+        desired_yaw = math.atan2(direction_y, direction_x)
 
-    while heading_error > math.pi:
-        heading_error -= 2 * math.pi
+        # -------- Heading Error -------- #
 
-    while heading_error < -math.pi:
-        heading_error += 2 * math.pi
+        heading_error = desired_yaw - vehicle_yaw
 
-    # -------- Steering PID -------- #
+        while heading_error > math.pi:
+            heading_error -= 2 * math.pi
 
-    steer = steering_pid.control(heading_error, dt)
+        while heading_error < -math.pi:
+            heading_error += 2 * math.pi
 
-    steer = max(-1.0, min(1.0, steer))
+        # -------- Steering PID -------- #
 
-    # -------- Current Speed -------- #
+        steer = steering_pid.control(heading_error, dt)
 
-    velocity = vehicle.get_velocity()
+        steer = max(-1.0, min(1.0, steer))
 
-    current_speed = math.sqrt(
-        velocity.x ** 2 +
-        velocity.y ** 2 +
-        velocity.z ** 2
-    )
+        # -------- Current Speed -------- #
 
-    # -------- Target Speed -------- #
+        velocity = vehicle.get_velocity()
 
-    target_speed = 5.0
+        current_speed = math.sqrt(
+            velocity.x ** 2 +
+            velocity.y ** 2 +
+            velocity.z ** 2
+        )
 
-    (
-        target_speed,
-        emergency_brake,
-        obstacle,
-        obstacle_distance
-    ) = obstacle_awareness.apply_reactive_speed(target_speed)
+        # -------- Target Speed -------- #
 
-    (
-        target_speed,
-        traffic_light_brake,
-        traffic_light_state
-    ) = traffic_light_handler.apply_reactive_speed(target_speed)
+        cruise_speed = 5.0
+        target_speed = cruise_speed
 
-    emergency_brake = emergency_brake or traffic_light_brake
+        (
+            target_speed,
+            emergency_brake,
+            obstacle,
+            obstacle_distance
+        ) = obstacle_awareness.apply_reactive_speed(
+            target_speed,
+            current_speed
+        )
 
-    speed_error = target_speed - current_speed
+        (
+            target_speed,
+            traffic_light_brake,
+            traffic_light_state
+        ) = traffic_light_handler.apply_reactive_speed(target_speed)
 
-    # -------- Speed PID -------- #
+        emergency_brake = emergency_brake or traffic_light_brake
 
-    throttle_output = speed_pid.control(speed_error, dt)
+        desired_target_speed = target_speed
 
-    throttle = 0.0
-    brake = 0.0
+        target_speed = speed_smoother.smooth_target_speed(
+            desired_target_speed,
+            dt,
+            emergency_brake
+        )
 
-    if throttle_output >= 0:
-        throttle = min(throttle_output, 1.0)
-    else:
-        brake = min(abs(throttle_output), 1.0)
+        speed_error = target_speed - current_speed
 
-    if emergency_brake:
+        # -------- Speed PID -------- #
+
+        throttle_output = speed_pid.control(speed_error, dt)
+
         throttle = 0.0
-        brake = 1.0
+        brake = 0.0
 
-    # -------- Vehicle Control -------- #
+        if throttle_output >= 0:
+            throttle = min(throttle_output, 1.0)
+        else:
+            brake = min(abs(throttle_output), 1.0)
 
-    control = carla.VehicleControl(
-        throttle=throttle,
-        steer=steer,
-        brake=brake
-    )
+        if emergency_brake:
+            throttle = 0.0
+            brake = 1.0
 
-    vehicle.apply_control(control)
-
-    # -------- Metrics Recording -------- #
-
-    metrics.record(
-        current_speed,
-        heading_error,
-        steer
-    )
-
-    plot_metrics.record(
-        current_speed,
-        heading_error,
-        steer
-    )
-
-    obstacle_message = ""
-
-    if obstacle is not None:
-        obstacle_message = (
-            f" | Obstacle: {obstacle.type_id} "
-            f"{obstacle_distance:.1f}m"
+        throttle, brake = speed_smoother.smooth_control(
+            throttle,
+            brake,
+            dt,
+            emergency_brake
         )
 
-    traffic_light_message = ""
+        # -------- Vehicle Control -------- #
 
-    if traffic_light_state is not None:
-        traffic_light_message = (
-            f" | Light: {traffic_light_state}"
+        control = carla.VehicleControl(
+            throttle=throttle,
+            steer=steer,
+            brake=brake
         )
 
-    print(
-        f"Step {i} | "
-        f"Speed: {current_speed:.2f} | "
-        f"Target: {target_speed:.2f} | "
-        f"Steer: {steer:.2f}"
-        f"{obstacle_message}"
-        f"{traffic_light_message}"
-    )
+        vehicle.apply_control(control)
 
-    time.sleep(dt)
+        # -------- Metrics Recording -------- #
+
+        metrics.record(
+            current_speed,
+            heading_error,
+            steer
+        )
+
+        plot_metrics.record(
+            current_speed,
+            heading_error,
+            steer
+        )
+
+        obstacle_message = ""
+
+        if obstacle is not None:
+            obstacle_message = (
+                f" | Obstacle: {obstacle.type_id} "
+                f"{obstacle_distance:.1f}m"
+            )
+
+        traffic_light_message = ""
+
+        if traffic_light_state is not None:
+            traffic_light_message = (
+                f" | Light: {traffic_light_state}"
+            )
+
+        print(
+            f"Step {i} | "
+            f"Speed: {current_speed:.2f} | "
+            f"Desired: {desired_target_speed:.2f} | "
+            f"Target: {target_speed:.2f} | "
+            f"Steer: {steer:.2f}"
+            f"{obstacle_message}"
+            f"{traffic_light_message}"
+        )
+
+        time.sleep(dt)
 
 
-# ---------------- Stop Vehicle ---------------- #
+    # ---------------- Stop Vehicle ---------------- #
 
-vehicle.apply_control(
-    carla.VehicleControl(
-        throttle=0.0,
-        steer=0.0,
-        brake=1.0
-    )
-)
+    if vehicle is not None and vehicle.is_alive:
+        vehicle.apply_control(
+            carla.VehicleControl(
+                throttle=0.0,
+                steer=0.0,
+                brake=1.0
+            )
+        )
 
-time.sleep(2)
-
-
-# ---------------- Metrics Summary ---------------- #
-
-metrics.summary()
+    time.sleep(2)
 
 
-# ---------------- Cleanup ---------------- #
+    # ---------------- Metrics Summary ---------------- #
 
-collision_sensor.destroy()
+    metrics.summary()
 
-lane_sensor.destroy()
+finally:
 
-camera_manager.destroy()
+    # ---------------- Cleanup ---------------- #
 
-traffic_spawner.destroy()
+    if vehicle is not None and vehicle.is_alive:
+        vehicle.apply_control(
+            carla.VehicleControl(
+                throttle=0.0,
+                steer=0.0,
+                brake=1.0
+            )
+        )
 
-vehicle.destroy()
+    safe_destroy("Collision sensor", collision_sensor)
 
-print("Vehicle destroyed")
+    safe_destroy("Lane invasion sensor", lane_sensor)
 
+    safe_destroy("Camera manager", camera_manager)
 
-# ---------------- Close OpenCV ---------------- #
+    safe_destroy("Traffic spawner", traffic_spawner)
 
-import cv2
+    ActorCleanup.destroy_actor(vehicle)
 
-cv2.destroyAllWindows()
+    # ---------------- Close OpenCV ---------------- #
 
-time.sleep(1)
+    try:
+        import cv2
+
+        cv2.destroyAllWindows()
+
+    except Exception as exc:
+        print(f"OpenCV cleanup skipped: {exc}")
+
+    time.sleep(1)
 
 
 # ---------------- Plot Graphs ---------------- #
 
-plot_metrics.plot()
+if plot_metrics is not None:
+    plot_metrics.plot()
