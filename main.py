@@ -60,13 +60,13 @@ try:
 
     spawn_points = map.get_spawn_points()
 
-    spawn_point = spawn_points[20]
+    spawn_point = spawn_points[25]
 
     vehicle = world.spawn_actor(vehicle_bp, spawn_point)
 
     print(f"Vehicle spawned: {vehicle.id}")
 
-
+    
     # ---------------- Sensors ---------------- #
 
     collision_sensor = CollisionSensor(world, vehicle)

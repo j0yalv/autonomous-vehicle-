@@ -8,7 +8,7 @@ class SpeedSmoother:
         throttle_rate=1.4,
         brake_rate=3.5,
         control_deadband=0.04,
-        switch_deadband=0.12
+        switch_deadband=0.14
     ):
 
         self.target_speed = initial_speed
