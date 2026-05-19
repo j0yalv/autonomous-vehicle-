@@ -12,7 +12,7 @@ class TrafficSpawner:
         client,
         world,
         ego_vehicle,
-        vehicle_count=28,
+        vehicle_count=20,
         pedestrian_count=12
     ):
 

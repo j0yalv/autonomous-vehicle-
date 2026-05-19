@@ -1,4 +1,13 @@
 import cv2
+import numpy as np
+import tempfile
+import os
+
+COCO_NAMES = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus",
+    "train", "truck", "boat", "traffic light", "fire hydrant",
+    "stop sign", "parking meter", "bench", "bird", "cat", "dog"
+]
 
 
 class YOLODetector:
@@ -18,6 +27,12 @@ class YOLODetector:
         self.confidence = confidence
         self.model = None
         self.enabled = False
+
+        # Run YOLO every N frames
+        self.frame_count = 0
+
+        # Store previous annotated frame
+        self.last_result_frame = None
 
         try:
             from ultralytics import YOLO
@@ -44,65 +59,104 @@ class YOLODetector:
         if not self.enabled:
             return frame
 
-        # -------- Convert BGR -> RGB -------- #
+        # -------- Run YOLO Every 5 Frames -------- #
 
-        rgb_frame = cv2.cvtColor(
-            frame,
-            cv2.COLOR_BGR2RGB
-        )
+        self.frame_count += 1
 
-        # -------- YOLO Inference -------- #
+        if self.frame_count % 5 != 0:
 
-        results = self.model.predict(
-            source=[rgb_frame],
-            conf=self.confidence,
-            verbose=False
-        )
+            if self.last_result_frame is not None:
+                return self.last_result_frame
 
-        # -------- Draw Detections -------- #
+            return frame
 
-        for result in results:
+        temp_path = None
 
-            names = result.names
+        try:
 
-            for box in result.boxes:
+            # -------- Save Temporary Frame -------- #
 
-                class_id = int(box.cls[0])
+            tf = tempfile.NamedTemporaryFile(
+                suffix='.jpg',
+                delete=False
+            )
 
-                class_name = names[class_id]
+            temp_path = tf.name
+            tf.close()
 
-                if class_name not in self.TARGET_CLASSES:
+            cv2.imwrite(temp_path, frame)
+
+            # -------- YOLO Inference -------- #
+
+            results = self.model(
+                temp_path,
+                conf=self.confidence
+            )
+
+            # -------- Draw Detections -------- #
+
+            for result in results:
+
+                boxes = result.boxes
+
+                if boxes is None:
                     continue
 
-                confidence = float(box.conf[0])
+                names = result.names
 
-                x1, y1, x2, y2 = (
-                    box.xyxy[0]
-                    .cpu()
-                    .numpy()
-                    .astype(int)
-                )
+                for box in boxes:
 
-                color = (0, 255, 0)
+                    class_id = int(box.cls[0])
 
-                cv2.rectangle(
-                    frame,
-                    (x1, y1),
-                    (x2, y2),
-                    color,
-                    2
-                )
+                    class_name = names[class_id]
 
-                label = f"{class_name} {confidence:.2f}"
+                    if class_name not in self.TARGET_CLASSES:
+                        continue
 
-                cv2.putText(
-                    frame,
-                    label,
-                    (x1, max(y1 - 8, 16)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    color,
-                    2
-                )
+                    confidence = float(box.conf[0])
+
+                    x1, y1, x2, y2 = (
+                        box.xyxy[0]
+                        .cpu()
+                        .numpy()
+                        .astype(int)
+                    )
+
+                    color = (0, 255, 0)
+
+                    cv2.rectangle(
+                        frame,
+                        (x1, y1),
+                        (x2, y2),
+                        color,
+                        2
+                    )
+
+                    label = f"{class_name} {confidence:.2f}"
+
+                    cv2.putText(
+                        frame,
+                        label,
+                        (x1, max(y1 - 8, 16)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        color,
+                        2
+                    )
+
+            # Save latest annotated frame
+            self.last_result_frame = frame.copy()
+
+        except Exception as exc:
+
+            print(f"YOLO detection error: {exc}")
+
+        finally:
+
+            if temp_path is not None:
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
 
         return frame
